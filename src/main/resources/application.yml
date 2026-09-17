@@ -1,0 +1,153 @@
+# Configuración Principal del Motor de Conciliación Bancaria
+# ============================================================
+# Este archivo contiene la configuración de la aplicación incluyendo:
+# - Parámetros de conexión a PostgreSQL y Kafka
+# - Configuración de ventanas de matching y umbrales de SLA
+# - Endpoints de actuator para monitoreo
+
+server:
+  port: ${APP_PORT:8080}
+
+spring:
+  application:
+    name: reconciliation-service
+
+  # Configuración de PostgreSQL (bloqueante para consultas de estado)
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:reconciliation}
+    username: ${DB_USER:reconciliation_user}
+    password: ${DB_PASSWORD:reconciliation_pass}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  # Configuración de R2DBC (reactivo para operaciones de lectura)
+  r2dbc:
+    url: r2dbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:reconciliation}
+    username: ${DB_USER:reconciliation_user}
+    password: ${DB_PASSWORD:reconciliation_pass}
+    pool:
+      max-size: 20
+      min-idle: 5
+      acquire-timeout: 30s
+      max-idle-time: 30m
+
+  # Configuración de Kafka
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: reconciliation-consumer-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      properties:
+        spring.json.trusted.packages: com.pragma.reconciliation.*
+        spring.json.value.default.type: com.pragma.reconciliation.infrastructure.adapters.inbound.dto.MovementDto
+        max.poll.records: 500
+        max.poll.interval.ms: 300000
+        session.timeout.ms: 45000
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      retries: 3
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+
+# Configuración Específica de Conciliación
+reconciliation:
+  # Fuentes de datos que se concilian
+  sources:
+    - name: core-bancario
+      topic: movements.core
+      priority: 1
+    - name: gateway-pagos
+      topic: movements.payments
+      priority: 2
+    - name: sistema-liquidacion
+      topic: movements.settlement
+      priority: 3
+
+  # Ventana de matching: tiempo máximo para considerar movimientos como
+  # potencialmente reconciliables. Valor en minutos.
+  matching-window:
+    minutes: 5
+    # Para entornos de alta frecuencia, usar ventana más pequeña (1-5 min)
+    # Para entornos batch, considerar hasta 60 min
+
+  # Estados posibles de una conciliación
+  states:
+    pending: PENDING
+    matched: MATCHED
+    mismatched: MISMATCHED
+    manual-review: MANUAL_REVIEW
+
+  # Umbrales de SLA para alertas (en milisegundos)
+  sla:
+    warning-threshold-ms: 300000    # 5 minutos
+    critical-threshold-ms: 600000   # 10 minutos
+    max-acceptable-lag-ms: 900000   # 15 minutos
+
+  # Configuración de idempotencia
+  idempotency:
+    # Tiempo de retención para claves de idempotencia (en días)
+    key-ttl-days: 90
+    # Habilitar verificación de versión para reprocesamiento
+    version-checking-enabled: true
+
+  # Configuración de reprocesamiento
+  reprocessing:
+    # Estrategia: KAFKA_REPLAY o POSTGRES_SNAPSHOT
+    strategy: KAFKA_REPLAY
+    # Número máximo de reintentos por movimiento
+    max-retries: 3
+    # Intervalo entre reintentos (en milisegundos)
+    retry-interval-ms: 1000
+
+  # Configuración de métricas y monitoreo
+  monitoring:
+    enabled: true
+    metrics-interval-seconds: 30
+    lag-calculation-window: 100
+
+# Configuración de Actuator para monitoreo
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+    kafka:
+      enabled: true
+    db:
+      enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+
+# Configuración de Logging
+logging:
+  level:
+    root: INFO
+    com.pragma.reconciliation: DEBUG
+    org.springframework.kafka: INFO
+    org.apache.kafka: WARN
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
